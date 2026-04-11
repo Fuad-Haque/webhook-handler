@@ -2,6 +2,9 @@
 
 A production-ready webhook handler for Stripe, GitHub, and Shopify with JWT auth, idempotency, background processing, and a live dashboard.
 
+**Live URL:** https://webhook-handler-production-99e2.up.railway.app
+**Docs:** https://webhook-handler-production-99e2.up.railway.app/docs
+
 ## Structure
 
 ```
