@@ -3,7 +3,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.auth import (
@@ -45,6 +46,8 @@ from app.verification import (
     verify_shopify_signature,
     verify_stripe_signature,
 )
+from app.routers import inspector
+from app.ws_manager import manager
 
 STRIPE_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "placeholder")
 GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "placeholder")
@@ -52,8 +55,33 @@ SHOPIFY_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET", "placeholder")
 
 app = FastAPI(title="Webhook Handler", version="1.0.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://fuadhaque.com",
+        "https://webhook-inspector-frontend.vercel.app",
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# ── Auth ─────────────────────────────────────────────────────────────────────
+app.include_router(inspector.router)
+
+
+# ── WebSocket ─────────────────────────────────────────────────────────────────
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 @app.post("/auth/register", response_model=UserResponse, status_code=201)
 async def register(user_in: UserCreate):
@@ -93,7 +121,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     return Token(access_token=token, token_type="bearer")
 
 
-# ── Webhook helpers ──────────────────────────────────────────────────────────
+# ── Webhook helpers ───────────────────────────────────────────────────────────
 
 def _make_event(source: str, event_type: str, event_id: str, payload: dict) -> dict:
     return {
@@ -120,7 +148,6 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
 
-    # Skip verification only if secret is the default placeholder
     if STRIPE_SECRET != "placeholder" and signature:
         if not verify_stripe_signature(payload, signature, STRIPE_SECRET):
             raise HTTPException(status_code=401, detail="Invalid Stripe signature")
@@ -128,7 +155,6 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         event = json.loads(payload)
     except Exception as e:
-        # Log internally, still return 200
         bad_id = str(uuid4())
         add_event(_make_event("stripe", "parse_error", bad_id, {}))
         update_event(bad_id, {"status": "error", "error": str(e)})
@@ -232,7 +258,6 @@ async def shopify_webhook(request: Request, background_tasks: BackgroundTasks):
         return {"received": True, "event_id": bad_id}
 
     event_id = str(event.get("id", str(uuid4())))
-    # Shopify can send the same event multiple times; use topic+id as key
     idempotency_key = f"shopify-{topic}-{event_id}"
 
     entry = _make_event("shopify", topic, idempotency_key, event)
